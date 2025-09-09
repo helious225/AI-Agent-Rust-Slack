@@ -1,0 +1,24 @@
+package component:ai-agent;
+
+interface ai-agent {
+  process-query: func(query: string, context: option<string>) -> result<string, string>;
+  fetch-and-process: func(url: string) -> result<string, string>;
+  multi-source-response: func(query: string, urls: list<string>) -> result<string, string>;
+  health-check: func() -> string;
+}
+
+world ai-agent-world {
+  // HTTP server world (WORLD => include)
+  include wasi:http/proxy@0.2.7;
+
+  // Sockets are INTERFACES (=> import)
+  import wasi:sockets/instance-network@0.2.7;
+  import wasi:sockets/ip-name-lookup@0.2.7;
+  import wasi:sockets/network@0.2.7;
+  import wasi:sockets/tcp-create-socket@0.2.7;
+  import wasi:sockets/tcp@0.2.7;
+  import wasi:sockets/udp-create-socket@0.2.7;
+  import wasi:sockets/udp@0.2.7;
+
+  export ai-agent;
+}
