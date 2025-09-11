@@ -1,148 +1,319 @@
-# AI Agent Sockets (WASI)
+# AI Agent Rust Slack
 
-A WebAssembly component that provides HTTP server capabilities with outbound TCP networking using `wasi:sockets`. This component demonstrates how to build network-enabled WASI applications that can communicate with external services.
+A WebAssembly (WASM) AI agent built with Rust that integrates with Slack slash commands and OpenAI's API. This agent demonstrates the power of WebAssembly System Interface (WASI) for building secure, portable network services.
 
-## Features
+## 🚀 Features
 
-### HTTP Server Endpoints
-- `GET /health` - Health check endpoint that returns `ok`
-- `GET /` - Makes a TCP request to a configurable host/port (defaults to `example.com:80`) and returns the response
-- `GET /tcp/send?host=HOST&port=PORT&msg=TEXT` - Opens a raw TCP socket, sends the specified text, and returns the server's reply
+- **Slack Integration**: Handles Slack slash commands with immediate acknowledgment and async responses
+- **OpenAI API**: Integrates with OpenAI's chat completions API for AI-powered responses
+- **WebAssembly**: Runs as a WASM component using `wasmtime` runtime
+- **WASI Sockets**: Uses `wasi:sockets` for outbound TCP connections and HTTP requests
+- **Environment Variables**: Secure configuration via environment variables
+- **Debug Endpoints**: Built-in debugging tools for testing connectivity and API calls
+- **Error Handling**: Comprehensive error reporting with HTTP status codes and response bodies
 
-### Networking Capabilities
-- Outbound TCP connections via `wasi:sockets`
-- Socket operations: connect, write, read
-- Network error handling and fallback mechanisms
-- DNS resolution with IPv4 fallback support
+## 🏗️ Architecture
 
-## Requirements
+This agent is built using:
+- **Rust** as the programming language
+- **WebAssembly (WASM)** as the runtime target
+- **WASI** (WebAssembly System Interface) for system access
+- **wasmtime** as the WASM runtime
+- **cargo-component** for building WASI components
 
-- **Rust + Cargo** - Latest stable version
-- **cargo-component** - For building WASI components
-  ```bash
-  cargo install cargo-component
-  ```
-- **Wasmtime ≥ 20** - Component-aware runtime for executing the WASM component
+### Key WASI Interfaces Used
 
-## Build
+- `wasi:http/incoming-handler` - Handle incoming HTTP requests
+- `wasi:http/outgoing-handler` - Make outgoing HTTP requests
+- `wasi:sockets` - Raw TCP socket operations
+- `wasi:sockets/ip-name-lookup` - DNS resolution
+- `wasi:io/poll` - Asynchronous I/O polling
 
-1. Clone and navigate to the project directory:
-   ```bash
-   cd ai-agent-sockets
-   ```
+## 📋 Prerequisites
 
-2. Build the WebAssembly component:
-   ```bash
-   cargo component build --release --target wasm32-wasip2
-   ```
+- Rust (latest stable)
+- `cargo-component` (for building WASI components)
+- `wasmtime` (for running WASM components)
+- OpenAI API key
 
-This creates the component at:
-```
-target/wasm32-wasip2/release/ai_agent_sockets.wasm
-```
-
-## Run
-
-### Option 1: Run Pre-built Container Image
-
-The component is available as a pre-built container image:
+### Installation
 
 ```bash
-# Pull and run the latest version
-docker run -p 8081:8081 ghcr.io/couple-shine/ai-agent-sockets:latest
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Install cargo-component
+cargo install --git https://github.com/bytecodealliance/cargo-component
+
+# Install wasmtime
+curl https://wasmtime.dev/install.sh -sSf | bash
 ```
 
-### Option 2: Run from Local Build
-
-Start the HTTP server with network capabilities using your local build:
+## 🔧 Building
 
 ```bash
+# Clone and navigate to the project
+cd ai-agent-rust-slack
+
+# Build the WASM component
+cargo component build --release --target wasm32-wasip2
+```
+
+The built component will be available at:
+`target/wasm32-wasip1/release/ai_agent_rust_slack.wasm`
+
+## 🚀 Running
+
+### Basic Run
+
+```bash
+# Start the agent with environment variables
 wasmtime serve -S cli -S inherit-network \
+  --env OPENAI_API_KEY=your_openai_api_key_here \
+  --env LLM_MODEL=gpt-4o-mini \
   --addr 0.0.0.0:8081 \
-  target/wasm32-wasip2/release/ai_agent_sockets.wasm
+  target/wasm32-wasip1/release/ai_agent_rust_slack.wasm
 ```
 
-### Command Options
-- `-S inherit-network` - Grants network capability to the component
-- `--addr 0.0.0.0:8081` - Binds the server to all interfaces on port 8081
-- `-S cli` - Enables CLI capabilities
+### Docker Run
 
-> **Note:** If you encounter "The serve command currently requires a component", ensure you built with `cargo component build` and are using the `wasm32-wasip2` target.
+```bash
+# Build Docker image
+docker build -t ai-agent-rust-slack .
 
-## Testing
+# Run with environment variables
+docker run -p 8081:8081 \
+  -e OPENAI_API_KEY=your_openai_api_key_here \
+  -e LLM_MODEL=gpt-4o-mini \
+  ai-agent-rust-slack
+```
+
+## 🔌 API Endpoints
+
+### Slack Integration
+
+#### `POST /slack/command`
+Handles Slack slash commands.
+
+**Request Format:**
+```
+Content-Type: application/x-www-form-urlencoded
+
+text=Your message here&response_url=https://hooks.slack.com/...
+```
+
+**Response:**
+- Immediate: `ack` (acknowledgment)
+- Async: JSON response posted to `response_url`
+
+**Example:**
+```bash
+curl -X POST http://localhost:8081/slack/command \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data 'text=Tell me a joke&response_url=http://localhost:8083/'
+```
 
 ### Health Check
-Test the health endpoint:
+
+#### `GET /health`
+Returns server health status.
+
+**Response:** `ok`
+
+### Debug Endpoints
+
+#### `GET /debug/httpget?url=<URL>`
+Test outbound HTTP GET requests to any URL.
+
+**Example:**
 ```bash
-curl -i http://127.0.0.1:8081/health
+curl "http://localhost:8081/debug/httpget?url=https://httpbin.org/get"
 ```
 
-### TCP Networking Test
-Set up a local HTTP server and test TCP connectivity:
-```bash
-# Start a local HTTP server on port 8082
-python3 -m http.server 8082 &
+#### `GET /debug/openai`
+Test OpenAI API connectivity directly.
 
-# Test TCP connection through the agent
-curl "http://127.0.0.1:8081/?host=127.0.0.1&port=8082"
+**Response:** Shows API key prefix, model, and full OpenAI response.
+
+### TCP Testing
+
+#### `GET /tcp/send?host=<host>&port=<port>&msg=<message>`
+Send a message via TCP and receive the response.
+
+**Example:**
+```bash
+curl "http://localhost:8081/tcp/send?host=127.0.0.1&port=9090&msg=Hello"
 ```
 
-### Raw TCP Send/Receive Test
-Test direct TCP socket communication:
+## 🔧 Configuration
 
+### Environment Variables
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `OPENAI_API_KEY` | Your OpenAI API key | - | Yes |
+| `LLM_MODEL` | OpenAI model to use | `gpt-4o-mini` | No |
+
+### Slack App Configuration
+
+1. Create a Slack app at [api.slack.com](https://api.slack.com)
+2. Enable Slash Commands
+3. Set the Request URL to: `https://your-domain.com/slack/command`
+4. Configure the slash command (e.g., `/ai`)
+
+## 🧪 Testing
+
+### Test Slack Integration
+
+1. Start a local webhook receiver:
 ```bash
-# Start a simple echo server on localhost:9090
-python3 - <<'EOF'
-import socket, threading
-
-def handle_client(conn, addr):
-    with conn:
-        data = conn.recv(65535)
-        conn.sendall(b"echo:" + data)
-
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", 9090))
-s.listen(5)
-print("Echo server listening on 127.0.0.1:9090")
-
-while True:
-    conn, addr = s.accept()
-    threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
-EOF
-
-# In another terminal, send a message via the agent
-curl "http://127.0.0.1:8081/tcp/send?host=127.0.0.1&port=9090&msg=hello%20wasi"
+python3 -c "
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        l = int(self.headers.get('Content-Length', '0') or 0)
+        body = self.rfile.read(l).decode('utf-8')
+        print('Slack Response:', body)
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+HTTPServer(('0.0.0.0', 8083), H).serve_forever()
+"
 ```
 
-## Troubleshooting
+2. Test the Slack command:
+```bash
+curl -X POST http://localhost:8081/slack/command \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data 'text=Tell me a joke&response_url=http://localhost:8083/'
+```
+
+### Test OpenAI API
+
+```bash
+curl "http://localhost:8081/debug/openai"
+```
+
+### Test HTTP Connectivity
+
+```bash
+curl "http://localhost:8081/debug/httpget?url=https://example.com/"
+```
+
+## 🐛 Troubleshooting
 
 ### Common Issues
 
-**DNS Resolution Errors** (e.g., `permanent-resolver-failure`)
-- Your runtime/network namespace may not permit DNS resolution
-- **Solution:** Use direct IP addresses or test against `127.0.0.1`
-- **Note:** For `example.com`, the component includes a fallback to known IPv4 addresses
+#### "Address already in use"
+```bash
+# Kill existing processes
+pkill -f wasmtime
+```
 
-**Connection Timeouts or Refused Connections**
-- Verify that a service is listening at the target `host:port`
-- Check firewall/egress rules if running in a container or VM environment
-- Ensure the target service accepts connections from your network interface
+#### "OpenAI API key not set"
+Ensure the environment variable is set:
+```bash
+export OPENAI_API_KEY=your_key_here
+```
 
-**Build Errors: "The serve command currently requires a component"**
-- **Solution:** Build with `cargo component build --target wasm32-wasip2`
-- Ensure you're pointing Wasmtime to the correct component path under `wasm32-wasip2`
+#### "EOF while parsing a value"
+This was a known issue with response body reading that has been fixed by adding proper polling to the `InputStream`.
 
-## Customization
+#### DNS Resolution Issues
+The agent includes fallback IP addresses for common hosts like `example.com`.
 
-The component can be extended by editing `src/lib.rs`:
+### Debug Mode
 
-- **Change default targets** - Modify the default host/port values
-- **Add new HTTP routes** - Implement additional endpoints for different networking patterns
-- **Enhanced error handling** - Add more sophisticated error handling and logging
-- **Protocol support** - Add support for other protocols beyond raw TCP
-- **Authentication** - Implement authentication mechanisms for secure connections
+The agent includes extensive debug logging. Check the server output for:
+- `DEBUG call_openai:` - OpenAI API call details
+- HTTP status codes and response bodies
+- Network connectivity information
 
-## License
+## 📁 Project Structure
 
-MIT
+```
+ai-agent-rust-slack/
+├── src/
+│   └── lib.rs              # Main agent implementation
+├── wit/
+│   └── world.wit           # WASI interface definitions
+├── Cargo.toml              # Rust dependencies and metadata
+├── Dockerfile              # Container configuration
+└── README.md               # This file
+```
+
+## 🔒 Security Considerations
+
+- API keys are passed via environment variables (not hardcoded)
+- The agent runs in a sandboxed WASM environment
+- Network access is controlled via WASI capabilities
+- No persistent storage of sensitive data
+
+## 🚀 Deployment
+
+### Docker Deployment
+
+```bash
+# Build and push to registry
+docker build -t your-registry/ai-agent-rust-slack .
+docker push your-registry/ai-agent-rust-slack
+
+# Deploy with environment variables
+docker run -d -p 8081:8081 \
+  -e OPENAI_API_KEY=your_key \
+  -e LLM_MODEL=gpt-4o-mini \
+  your-registry/ai-agent-rust-slack
+```
+
+### Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-agent-rust-slack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-agent-rust-slack
+  template:
+    metadata:
+      labels:
+        app: ai-agent-rust-slack
+    spec:
+      containers:
+      - name: ai-agent
+        image: your-registry/ai-agent-rust-slack
+        ports:
+        - containerPort: 8081
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: openai-secret
+              key: api-key
+        - name: LLM_MODEL
+          value: "gpt-4o-mini"
+```
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## 🙏 Acknowledgments
+
+- [WebAssembly](https://webassembly.org/) for the runtime
+- [WASI](https://wasi.dev/) for the system interface
+- [wasmtime](https://wasmtime.dev/) for the runtime
+- [OpenAI](https://openai.com/) for the AI API
+- [Slack](https://api.slack.com/) for the integration platform

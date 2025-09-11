@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 WORKDIR /app
 # Copy the built component from the build context
-COPY target/wasm32-wasip2/release/ai_agent_sockets.wasm /app/app.wasm
+COPY target/wasm32-wasip1/release/ai_agent_rust_slack.wasm /app/app.wasm
 
 EXPOSE 8081
 CMD ["wasmtime","serve","-S","cli","-S","inherit-network","--addr","0.0.0.0:8081","/app/app.wasm"]

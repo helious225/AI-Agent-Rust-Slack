@@ -1,5 +1,5 @@
 [package]
-name = "ai-agent-sockets"
+name = "ai-agent-rust-slack"
 version = "0.1.0"
 edition = "2021"
 
@@ -14,7 +14,7 @@ serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 
 [package.metadata.component]
-package = "component:ai-agent"
+package = "component:ai-agent-rust-slack"
 
 [package.metadata.component.target]
 path = "wit"

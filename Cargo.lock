@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "ai-agent-sockets"
+name = "ai-agent-rust-slack"
 version = "0.1.0"
 dependencies = [
  "anyhow",

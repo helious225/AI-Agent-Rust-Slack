@@ -5,6 +5,8 @@ mod bindings;
 use bindings::exports::component::ai_agent::ai_agent;
 use bindings::exports::wasi::http::incoming_handler;
 use bindings::wasi::http::types as http;
+use bindings::wasi::http::types::{Method, Scheme};
+use bindings::wasi::http::outgoing_handler;
 
 use bindings::wasi::sockets::instance_network::instance_network;
 use bindings::wasi::sockets::{ip_name_lookup, network as net};
@@ -12,6 +14,8 @@ use bindings::wasi::sockets::tcp::{self, ErrorCode as TcpErrorCode};
 use bindings::wasi::sockets::tcp_create_socket;
 use bindings::wasi::io::{poll, streams};
 use std::collections::HashMap;
+use serde_json;
+use std::env;
 
 struct Component;
 
@@ -51,6 +55,25 @@ impl incoming_handler::Guest for Component {
 
         let response_text = if path == "/health" {
             "ok".to_string()
+        } else if path == "/slack/command" {
+            // Slack slash command: body is x-www-form-urlencoded
+            let body_text = read_request_body(&req);
+            let form = parse_query_params(body_text);
+            let text = form.get("text").cloned().unwrap_or_default();
+            let response_url = form.get("response_url").cloned().unwrap_or_default();
+
+            // Build reply content via OpenAI or fallback
+            let reply = match call_openai(&text) {
+                Ok(ai_response) => ai_response,
+                Err(e) => format!("You said: {} (AI unavailable: {})", text, e),
+            };
+
+            if !response_url.is_empty() {
+                // Build Slack-compatible JSON body
+                let json = serde_json::json!({"response_type":"in_channel","text": reply});
+                let _ = http_post_text(&response_url, &json.to_string(), "application/json");
+            }
+            "ack".to_string()
         } else if path == "/tcp/send" {
             // Send a custom message over TCP and return the response
             let mut host = "127.0.0.1".to_string();
@@ -67,6 +90,38 @@ impl incoming_handler::Guest for Component {
             match tcp_send_message(&host, port, &msg) {
                 Ok(reply) => format!("✅ Sent to {host}:{port}\n\n> {msg}\n\n< {reply}\n"),
                 Err(e) => format!("⚠️  Send failed: {e}\nTarget: {host}:{port}\n"),
+            }
+        } else if path.starts_with("/debug/httpget") {
+            // Example: /debug/httpget?url=https://httpbin.org/get
+            let mut url = "https://httpbin.org/get".to_string();
+            if let Some(qs) = query.clone() {
+                let params = parse_query_params(qs);
+                if let Some(u) = params.get("url") { url = u.to_string(); }
+            }
+            match http_get_text(&url) {
+                Ok(text) => format!("GET {}\n\n{}", url, text),
+                Err(e) => format!("GET {} failed: {}", url, e),
+            }
+        } else if path.starts_with("/debug/openai") {
+            let api_key = get_env_var("OPENAI_API_KEY").unwrap_or_else(|| "MISSING".to_string());
+            let model = get_env_var("LLM_MODEL").unwrap_or_else(|| "gpt-4o-mini".to_string());
+            
+            // Test with a simple request
+            let test_payload = format!(r#"{{"model":"{}","messages":[{{"role":"user","content":"Hello"}}],"max_tokens":10}}"#, model);
+            
+            match http_post_json("https://api.openai.com/v1/chat/completions", &test_payload, &api_key) {
+                Ok(response_body) => {
+                    format!("OpenAI API Test Success:\nModel: {}\nAPI Key: {}...\nResponse: {}", 
+                        model, 
+                        if api_key.len() > 10 { &api_key[..10] } else { &api_key },
+                        response_body)
+                }
+                Err(e) => {
+                    format!("OpenAI API Test Failed:\nModel: {}\nAPI Key: {}...\nError: {}", 
+                        model,
+                        if api_key.len() > 10 { &api_key[..10] } else { &api_key },
+                        e)
+                }
             }
         } else {
             // Defaults
@@ -118,6 +173,75 @@ fn try_dns_resolve(nw: &net::Network, hostname: &str) -> Result<net::IpAddress, 
             }
             Err(e) => return Err(format!("resolve error: {e:?}")),
         }
+    }
+}
+
+/* ---- Read entire request body as String ---- */
+fn read_request_body(req: &http::IncomingRequest) -> String {
+    if let Ok(inc_body) = req.consume() {
+        if let Ok(stream) = inc_body.stream() {
+            let mut buf = Vec::new();
+            loop {
+                match streams::InputStream::read(&stream, 32 * 1024) {
+                    Ok(chunk) if chunk.is_empty() => break,
+                    Ok(mut chunk) => buf.append(&mut chunk),
+                    Err(_) => break,
+                }
+            }
+            // Drop the stream before finishing the body
+            drop(stream);
+            let _ = http::IncomingBody::finish(inc_body);
+            return String::from_utf8_lossy(&buf).into_owned();
+        }
+    }
+    String::new()
+}
+
+/* ---- Minimal HTTP POST client (text body) ---- */
+fn http_post_text(url: &str, body: &str, content_type: &str) -> Result<(), String> {
+    // naive URL parse for https://host/path
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (Scheme::Https, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (Scheme::Http, r)
+    } else {
+        return Err("unsupported scheme".into());
+    };
+    let mut parts = rest.splitn(2, '/');
+    let authority = parts.next().unwrap_or("");
+    let path = format!("/{}", parts.next().unwrap_or(""));
+
+    let headers = http::Headers::new();
+    let _ = headers.append("content-type", content_type.as_bytes());
+    let len_str = body.as_bytes().len().to_string();
+    let _ = headers.append("content-length", len_str.as_bytes());
+
+    let req = http::OutgoingRequest::new(headers);
+    let _ = req.set_method(&Method::Post);
+    let _ = req.set_scheme(Some(&scheme));
+    let _ = req.set_authority(Some(authority));
+    let _ = req.set_path_with_query(Some(&path));
+
+    if let Ok(ob) = req.body() {
+        if let Ok(mut w) = ob.write() {
+            let _ = w.blocking_write_and_flush(body.as_bytes());
+            // Explicitly drop writer before finishing
+            drop(w);
+        }
+        let _ = http::OutgoingBody::finish(ob, None);
+    }
+
+    let opts = http::RequestOptions::new();
+    let fut = match outgoing_handler::handle(req, Some(opts)) {
+        Ok(f) => f,
+        Err(e) => return Err(format!("http handle: {e:?}")),
+    };
+    let pollable = fut.subscribe();
+    let _ = poll::poll(&[&pollable]);
+    match fut.get() {
+        Some(Ok(_resp)) => Ok(()),
+        Some(Err(e)) => Err(format!("await resp: {e:?}")),
+        None => Err("await resp: none".into()),
     }
 }
 
@@ -382,6 +506,181 @@ fn parse_ipv4(s: &str) -> Option<net::Ipv4Address> {
     let c = parts[2].parse::<u8>().ok()?;
     let d = parts[3].parse::<u8>().ok()?;
     Some((a, b, c, d))
+}
+
+/* ---- OpenAI API call ---- */
+fn call_openai(user_text: &str) -> Result<String, String> {
+    // Get API key from environment (no hardcoded default)
+    let api_key = get_env_var("OPENAI_API_KEY").unwrap_or_default();
+    let model = get_env_var("LLM_MODEL").unwrap_or_else(|| "gpt-4o-mini".to_string());
+    
+    if api_key.is_empty() {
+        return Err("OPENAI_API_KEY not set".into());
+    }
+
+    // Use the same format as debug endpoint which works
+    let payload = format!(r#"{{"model":"{}","messages":[{{"role":"user","content":"{}"}}],"max_tokens":150,"temperature":0.7}}"#, model, user_text.replace('"', r#"\""#));
+
+    let response_body = http_post_json("https://api.openai.com/v1/chat/completions", &payload, &api_key)?;
+    
+    // Parse OpenAI response
+    match serde_json::from_str::<serde_json::Value>(&response_body) {
+        Ok(json) => {
+            if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
+                Ok(content.trim().to_string())
+            } else if let Some(error) = json["error"]["message"].as_str() {
+                Err(format!("OpenAI error: {}", error))
+            } else {
+                Err("Unexpected OpenAI response format".into())
+            }
+        }
+        Err(e) => Err(format!("Failed to parse OpenAI response: {}", e))
+    }
+}
+
+/* ---- Environment variable helper ---- */
+fn get_env_var(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|s| !s.is_empty())
+}
+
+/* ---- HTTP POST with JSON and Authorization ---- */
+fn http_post_json(url: &str, json_body: &str, api_key: &str) -> Result<String, String> {
+    // Parse URL
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (Scheme::Https, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (Scheme::Http, r)
+    } else {
+        return Err("unsupported scheme".into());
+    };
+    let mut parts = rest.splitn(2, '/');
+    let authority = parts.next().unwrap_or("");
+    let path = format!("/{}", parts.next().unwrap_or(""));
+
+    let headers = http::Headers::new();
+    let _ = headers.append("content-type", b"application/json");
+    let _ = headers.append("authorization", format!("Bearer {}", api_key).as_bytes());
+    let len_str = json_body.as_bytes().len().to_string();
+    let _ = headers.append("content-length", len_str.as_bytes());
+
+    let req = http::OutgoingRequest::new(headers);
+    let _ = req.set_method(&Method::Post);
+    let _ = req.set_scheme(Some(&scheme));
+    let _ = req.set_authority(Some(authority));
+    let _ = req.set_path_with_query(Some(&path));
+
+    if let Ok(ob) = req.body() {
+        if let Ok(mut w) = ob.write() {
+            let _ = w.blocking_write_and_flush(json_body.as_bytes());
+            // Explicitly drop writer before finishing
+            drop(w);
+        }
+        let _ = http::OutgoingBody::finish(ob, None);
+    }
+
+    let opts = http::RequestOptions::new();
+    let fut = match outgoing_handler::handle(req, Some(opts)) {
+        Ok(f) => f,
+        Err(e) => return Err(format!("http handle: {e:?}")),
+    };
+    let pollable = fut.subscribe();
+    let _ = poll::poll(&[&pollable]);
+    
+    match fut.get() {
+        Some(Ok(resp)) => {
+            // Read response body and include status on error
+            match resp {
+                Ok(actual_resp) => {
+                    let status = actual_resp.status();
+                    if let Ok(inc_body) = actual_resp.consume() {
+                        if let Ok(stream) = inc_body.stream() {
+                            let mut buf = Vec::new();
+                            loop {
+                                // Wait for stream to be ready before reading
+                                let pollable = stream.subscribe();
+                                let _ = poll::poll(&[&pollable]);
+                                
+                                match streams::InputStream::read(&stream, 32 * 1024) {
+                                    Ok(chunk) if chunk.is_empty() => break,
+                                    Ok(mut chunk) => buf.append(&mut chunk),
+                                    Err(_) => break,
+                                }
+                            }
+                            // Drop stream before finishing
+                            drop(stream);
+                            let _ = http::IncomingBody::finish(inc_body);
+                            let body_text = String::from_utf8_lossy(&buf).into_owned();
+                            if status >= 200 && status < 300 {
+                                return Ok(body_text);
+                            } else {
+                                return Err(format!("OpenAI HTTP {}: {}", status, body_text));
+                            }
+                        }
+                    }
+                    Err("failed to read response body".into())
+                }
+                Err(e) => Err(format!("response error: {e:?}"))
+            }
+        }
+        Some(Err(e)) => Err(format!("http response error: {e:?}")),
+        None => Err("http response timeout".into()),
+    }
+}
+
+/* ---- Minimal HTTP GET (text) ---- */
+fn http_get_text(url: &str) -> Result<String, String> {
+    let (scheme, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (Scheme::Https, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (Scheme::Http, r)
+    } else {
+        return Err("unsupported scheme".into());
+    };
+    let mut parts = rest.splitn(2, '/');
+    let authority = parts.next().unwrap_or("");
+    let path = format!("/{}", parts.next().unwrap_or(""));
+
+    let headers = http::Headers::new();
+    let req = http::OutgoingRequest::new(headers);
+    let _ = req.set_method(&Method::Get);
+    let _ = req.set_scheme(Some(&scheme));
+    let _ = req.set_authority(Some(authority));
+    let _ = req.set_path_with_query(Some(&path));
+
+    let opts = http::RequestOptions::new();
+    let fut = outgoing_handler::handle(req, Some(opts)).map_err(|e| format!("http handle: {e:?}"))?;
+    let pollable = fut.subscribe();
+    let _ = poll::poll(&[&pollable]);
+    match fut.get() {
+        Some(Ok(resp)) => match resp {
+            Ok(r) => {
+                let status = r.status();
+                if let Ok(inc_body) = r.consume() {
+                    if let Ok(stream) = inc_body.stream() {
+                        let mut buf = Vec::new();
+                        loop {
+                            match streams::InputStream::read(&stream, 32 * 1024) {
+                                Ok(chunk) if chunk.is_empty() => break,
+                                Ok(mut chunk) => buf.append(&mut chunk),
+                                Err(_) => break,
+                            }
+                        }
+                        drop(stream);
+                        let _ = http::IncomingBody::finish(inc_body);
+                        let body_text = String::from_utf8_lossy(&buf).into_owned();
+                        if status >= 200 && status < 300 {
+                            Ok(body_text)
+                        } else {
+                            Err(format!("HTTP {}: {}", status, body_text))
+                        }
+                    } else { Err("no body stream".into()) }
+                } else { Err("consume body failed".into()) }
+            }
+            Err(e) => Err(format!("response error: {e:?}"))
+        },
+        Some(Err(e)) => Err(format!("http response error: {e:?}")),
+        None => Err("http response timeout".into()),
+    }
 }
 
 /* ---- export glue ---- */
