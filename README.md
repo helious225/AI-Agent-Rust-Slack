@@ -309,11 +309,3 @@ spec:
 ## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🙏 Acknowledgments
-
-- [WebAssembly](https://webassembly.org/) for the runtime
-- [WASI](https://wasi.dev/) for the system interface
-- [wasmtime](https://wasmtime.dev/) for the runtime
-- [OpenAI](https://openai.com/) for the AI API
-- [Slack](https://api.slack.com/) for the integration platform
